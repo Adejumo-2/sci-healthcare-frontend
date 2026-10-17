@@ -34,6 +34,34 @@ async function getServer(): Promise<RpcServer> {
 
 export type SignFn = (xdrString: string) => Promise<string>;
 
+/**
+ * Checks whether an account exists on the network (is funded with XLM).
+ * Soroban RPC returns 404 / account not found for brand new accounts.
+ */
+export async function checkAccountFunded(address: string): Promise<boolean> {
+  if (isMockRpc()) {
+    if (
+      typeof window !== 'undefined' &&
+      (window as unknown as { __SCI_UNFUNDED_ACCOUNT__?: boolean })
+        .__SCI_UNFUNDED_ACCOUNT__
+    ) {
+      return false;
+    }
+    return true;
+  }
+  try {
+    const server = await getServer();
+    await server.getAccount(address);
+    return true;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (/not found|404/i.test(message)) {
+      return false;
+    }
+    return true;
+  }
+}
+
 /** How long to wait for a submitted transaction to reach a final status. */
 const CONFIRM_TIMEOUT_MS = 45_000;
 const POLL_INTERVAL_MS = 1_500;

@@ -2,7 +2,10 @@
 
 ## Unreleased
 
-### Added
+- Accessible wallet menu in `ConnectButton` replacing the static address display. Displays the active wallet name, full address copy with visual feedback, explorer link on Stellar Expert, and a disconnect button. Operable by keyboard (Escape, focus return) and mouse (#57).
+- Passkey smart wallet support using WebAuthn / secp256r1 biometrics on Soroban testnet, enabling passwordless, non-custodial signing without browser extensions alongside existing extension wallets (#58).
+- Silent wallet reconnection on mount persisting the selected wallet id in `localStorage` under `sci-wallet-id`, with complete cleanup on disconnect (#59).
+- Unfunded account detection via Soroban RPC on wallet connect; warns users when their account has no XLM balance and provides a prefilled link to Friendbot on testnet (#60).
 - Visual regression snapshots for the six routes (`/`, `/clinics/[address]`, `/my`, `/clinic`, `/attest`, `/vouchers/[id]`) at desktop and 390px widths, with the API mocked, the clock frozen and RPC blocked. Runs in CI; regenerate with `npm run test:visual:update`.
 - End-to-end tests for the fund, claim, attest, dispute and refund flows at desktop and 390px widths, with a mock wallet and mock RPC behind `window.__SCI_MOCK_WALLET__` / `window.__SCI_MOCK_RPC__` (test-only, no keys, production behaviour unchanged). Runs in CI as `npm run test:e2e`.
 - Cookieless usage analytics (Plausible) behind `NEXT_PUBLIC_PLAUSIBLE_DOMAIN`; unset disables it entirely. Pageviews use normalized routes and funnel events carry names only, so no addresses, references or amounts ever leave the browser.

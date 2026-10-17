@@ -12,6 +12,14 @@ import {
 
 import { config } from './config';
 import { mockWalletAddress } from './e2e-seam';
+import {
+  PASSKEY_WALLET_ID,
+  PasskeyModule,
+  connectPasskeyWallet,
+  getStoredPasskeyAddress,
+  signWithPasskey,
+} from './passkey';
+import { checkAccountFunded } from './stellar';
 
 /**
  * Wallet connection.
@@ -29,11 +37,13 @@ import { mockWalletAddress } from './e2e-seam';
  * instance, so initialisation is guarded to run exactly once.
  */
 
-type WalletState = {
+export type WalletState = {
   address: string | null;
+  walletName: string | null;
   connecting: boolean;
+  isUnfunded: boolean;
   error: string | null;
-  connect: () => Promise<void>;
+  connect: (walletId?: string) => Promise<void>;
   disconnect: () => Promise<void>;
   signTransaction: (xdr: string) => Promise<string>;
 };
@@ -41,9 +51,22 @@ type WalletState = {
 const WalletContext = createContext<WalletState | null>(null);
 
 const CONNECTED_FLAG = 'sci-wallet-connected';
+const SELECTED_WALLET_ID_KEY = 'sci-wallet-id';
 
 let initialised = false;
 let initPromise: Promise<void> | null = null;
+
+function getWalletDisplayName(id: string | null | undefined): string {
+  if (!id) return 'Connected Wallet';
+  if (id === PASSKEY_WALLET_ID) return 'Passkey Smart Wallet';
+  if (/freighter/i.test(id)) return 'Freighter';
+  if (/xbull/i.test(id)) return 'xBull Wallet';
+  if (/albedo/i.test(id)) return 'Albedo';
+  if (/lobstr/i.test(id)) return 'LOBSTR';
+  if (/rabet/i.test(id)) return 'Rabet';
+  if (/hana/i.test(id)) return 'Hana Wallet';
+  return id;
+}
 
 /** Loads the kit and initialises it exactly once. */
 function ensureInit(): Promise<void> {
@@ -66,7 +89,10 @@ function ensureInit(): Promise<void> {
           ? Networks.FUTURENET
           : Networks.TESTNET;
     StellarWalletsKit.init({
-      modules: defaultModules(),
+      modules: [
+        new PasskeyModule() as unknown as import('@creit.tech/stellar-wallets-kit').ModuleInterface,
+        ...defaultModules(),
+      ],
       selectedWalletId: FREIGHTER_ID,
       network,
     });
@@ -83,21 +109,21 @@ async function getKit() {
 
 export function WalletProvider({ children }: { children: ReactNode }) {
   const [address, setAddress] = useState<string | null>(null);
+  const [walletName, setWalletName] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [isUnfunded, setIsUnfunded] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Restore a previous session silently. The kit keeps its own selection in
-  // storage; if the wallet is locked or was revoked this simply fails and
-  // the user sees the connect button. Playwright end-to-end tests inject
-  // window.__SCI_MOCK_WALLET__ instead (see e2e-seam.ts) and skip the kit.
-  // The local flag avoids loading the kit at all on a first visit, so
-  // read-only pages stay light.
+  // Restore a previous session silently (#59).
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const mocked = mockWalletAddress();
       if (mocked) {
-        if (!cancelled) setAddress(mocked);
+        if (!cancelled) {
+          setAddress(mocked);
+          setWalletName('Mock Wallet');
+        }
         return;
       }
       try {
@@ -110,12 +136,38 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       } catch {
         return;
       }
+
+      const savedWalletId = (() => {
+        try {
+          return window.localStorage.getItem(SELECTED_WALLET_ID_KEY);
+        } catch {
+          return null;
+        }
+      })();
+
+      if (savedWalletId === PASSKEY_WALLET_ID) {
+        const passkeyAddr = getStoredPasskeyAddress();
+        if (!cancelled && passkeyAddr) {
+          setAddress(passkeyAddr);
+          setWalletName('Passkey Smart Wallet');
+        }
+        return;
+      }
+
       try {
         const kit = await getKit();
+        if (savedWalletId) {
+          kit.setWallet(savedWalletId);
+        }
         const { address: addr } = await kit.getAddress();
-        if (!cancelled && addr) setAddress(addr);
+        if (!cancelled && addr) {
+          setAddress(addr);
+          setWalletName(
+            getWalletDisplayName(savedWalletId || kit.selectedModule?.productId),
+          );
+        }
       } catch {
-        // Not connected yet. Expected on a first visit.
+        // Not connected yet or wallet locked.
       }
     })();
     return () => {
@@ -123,26 +175,69 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const connect = useCallback(async () => {
+  // Check if connected account exists on network (#60).
+  useEffect(() => {
+    if (!address) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const funded = await checkAccountFunded(address);
+        if (!cancelled) {
+          setIsUnfunded(!funded);
+        }
+      } catch {
+        if (!cancelled) setIsUnfunded(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [address]);
+
+  const connect = useCallback(async (walletId?: string) => {
     const mocked = mockWalletAddress();
     if (mocked) {
       setAddress(mocked);
+      setWalletName('Mock Wallet');
       return;
     }
     setConnecting(true);
     setError(null);
     try {
-      const kit = await getKit();
-      const { address: addr } = await kit.authModal();
+      let addr: string | null = null;
+      let selectedId: string | null = null;
+
+      if (walletId === PASSKEY_WALLET_ID) {
+        const passkey = await connectPasskeyWallet();
+        addr = passkey.address;
+        selectedId = PASSKEY_WALLET_ID;
+      } else {
+        const kit = await getKit();
+        if (walletId) {
+          kit.setWallet(walletId);
+          const res = await kit.getAddress();
+          addr = res.address;
+          selectedId = walletId;
+        } else {
+          const res = await kit.authModal();
+          addr = res.address;
+          selectedId = kit.selectedModule?.productId || null;
+        }
+      }
+
       setAddress(addr);
+      setWalletName(getWalletDisplayName(selectedId));
+
       try {
         window.localStorage.setItem(CONNECTED_FLAG, '1');
+        if (selectedId) {
+          window.localStorage.setItem(SELECTED_WALLET_ID_KEY, selectedId);
+        }
       } catch {
-        // Storage may be unavailable; the session simply will not restore.
+        // Storage may be unavailable
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      // Closing the modal is a normal action, not an error worth showing.
       if (!/closed|cancel/i.test(message)) setError(message);
     } finally {
       setConnecting(false);
@@ -151,31 +246,45 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
   const disconnect = useCallback(async () => {
     try {
-      if (!mockWalletAddress()) {
-        try {
-          const kit = await getKit();
-          await kit.disconnect();
-        } catch {
-          // The kit may never have loaded; clearing local state is enough.
-        }
-        try {
-          window.localStorage.removeItem(CONNECTED_FLAG);
-        } catch {
-          // Ignore storage failures on disconnect.
-        }
+      if (typeof window !== 'undefined') {
+        delete (window as unknown as { __SCI_MOCK_WALLET__?: unknown }).__SCI_MOCK_WALLET__;
+      }
+      try {
+        const kit = await getKit();
+        await kit.disconnect();
+      } catch {
+        // The kit may never have loaded
+      }
+      try {
+        window.localStorage.removeItem(CONNECTED_FLAG);
+        window.localStorage.removeItem(SELECTED_WALLET_ID_KEY);
+      } catch {
+        // Ignore storage failures
       }
     } finally {
       setAddress(null);
+      setWalletName(null);
+      setIsUnfunded(false);
     }
   }, []);
 
   const signTransaction = useCallback(
     async (xdr: string) => {
       if (!address) throw new Error('Connect a wallet first');
-      // Test signer: echoes the transaction back. The RPC mock (when present)
-      // accepts it without submission; without the RPC mock the network
-      // rejects it, so this can never sign a real transaction.
       if (mockWalletAddress()) return xdr;
+
+      const savedWalletId = (() => {
+        try {
+          return window.localStorage.getItem(SELECTED_WALLET_ID_KEY);
+        } catch {
+          return null;
+        }
+      })();
+
+      if (savedWalletId === PASSKEY_WALLET_ID || address.startsWith('C')) {
+        return signWithPasskey(xdr);
+      }
+
       const kit = await getKit();
       const { signedTxXdr } = await kit.signTransaction(xdr, {
         address,
@@ -187,11 +296,31 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   );
 
   const value = useMemo(
-    () => ({ address, connecting, error, connect, disconnect, signTransaction }),
-    [address, connecting, error, connect, disconnect, signTransaction],
+    () => ({
+      address,
+      walletName,
+      connecting,
+      isUnfunded,
+      error,
+      connect,
+      disconnect,
+      signTransaction,
+    }),
+    [
+      address,
+      walletName,
+      connecting,
+      isUnfunded,
+      error,
+      connect,
+      disconnect,
+      signTransaction,
+    ],
   );
 
-  return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;
+  return (
+    <WalletContext.Provider value={value}>{children}</WalletContext.Provider>
+  );
 }
 
 export function useWallet(): WalletState {

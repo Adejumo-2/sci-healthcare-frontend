@@ -58,3 +58,14 @@ export function explorerTx(hash: string): string {
 export function explorerContract(id: string): string {
   return `https://stellar.expert/explorer/${config.network}/contract/${id}`;
 }
+
+export function explorerAccount(address: string): string {
+  if (address.startsWith('C')) {
+    return explorerContract(address);
+  }
+  return `https://stellar.expert/explorer/${config.network}/account/${address}`;
+}
+
+export function friendbotUrl(address: string): string {
+  return `https://friendbot.stellar.org/?addr=${encodeURIComponent(address)}`;
+}
